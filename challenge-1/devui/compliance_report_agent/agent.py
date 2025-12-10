@@ -59,18 +59,29 @@ def parse_risk_analysis_result(
         if customer_match:
             analysis_data["parsed_elements"]["customer_id"] = customer_match.group(1)
         
-        # Extract key risk factors mentioned
+        # Extract key risk factors mentioned (with negation awareness)
         risk_factors = []
-        if "high-risk country" in text_lower or "high risk country" in text_lower:
-            risk_factors.append("HIGH_RISK_JURISDICTION")
-        if "large amount" in text_lower or "high amount" in text_lower:
-            risk_factors.append("UNUSUAL_AMOUNT")
+        
+        # Only add risk factors if mentioned positively (not negated)
+        if ("high-risk country" in text_lower or "high risk country" in text_lower):
+            if not any(neg in text_lower for neg in ["not a high-risk", "not high-risk", "no high-risk", "not involve a high-risk", "does not involve"]):
+                risk_factors.append("HIGH_RISK_JURISDICTION")
+        
+        if ("large amount" in text_lower or "high amount" in text_lower or "unusual amount" in text_lower):
+            if not any(neg in text_lower for neg in ["not a large", "not high", "not unusual", "no large", "no unusual"]):
+                risk_factors.append("UNUSUAL_AMOUNT")
+        
         if "suspicious" in text_lower:
-            risk_factors.append("SUSPICIOUS_PATTERN")
+            if not any(neg in text_lower for neg in ["not suspicious", "no suspicious", "nothing suspicious"]):
+                risk_factors.append("SUSPICIOUS_PATTERN")
+        
         if "sanction" in text_lower:
-            risk_factors.append("SANCTIONS_CONCERN")
+            if not any(neg in text_lower for neg in ["not sanctioned", "no sanction", "not under sanction"]):
+                risk_factors.append("SANCTIONS_CONCERN")
+        
         if "frequent" in text_lower or "unusual frequency" in text_lower:
-            risk_factors.append("FREQUENCY_ANOMALY")
+            if not any(neg in text_lower for neg in ["not frequent", "no unusual frequency"]):
+                risk_factors.append("FREQUENCY_ANOMALY")
         
         analysis_data["parsed_elements"]["risk_factors"] = risk_factors
         
@@ -133,8 +144,12 @@ def generate_audit_report_from_risk_analysis(
         }
         
         # Analyze risk score for audit conclusions
-        risk_score = elements.get("risk_score", 0)
-        if isinstance(risk_score, (int, float)):
+        risk_score = elements.get("risk_score", None)
+        
+        logger.info(f"Extracted risk_score = {risk_score}, type = {type(risk_score)}")
+        
+        # Primary decision based on risk score (if available)
+        if risk_score is not None and isinstance(risk_score, (int, float)):
             if risk_score >= 80:
                 audit_report["executive_summary"]["audit_conclusion"] = "HIGH RISK - Immediate review required"
                 audit_report["compliance_status"]["requires_immediate_action"] = True
@@ -146,9 +161,16 @@ def generate_audit_report_from_risk_analysis(
             else:
                 audit_report["executive_summary"]["audit_conclusion"] = "LOW RISK - Standard monitoring sufficient"
                 audit_report["compliance_status"]["compliance_rating"] = "COMPLIANT"
+        else:
+            # If we can't parse risk score, mark as PENDING and use risk factors as fallback
+            audit_report["executive_summary"]["audit_conclusion"] = "RISK ASSESSMENT PENDING - Unable to parse risk score"
+            audit_report["compliance_status"]["compliance_rating"] = "PENDING"
+            logger.warning(f"Could not parse risk score from analysis. Setting to PENDING.")
         
         # Add specific findings based on risk factors
         risk_factors = elements.get("risk_factors", [])
+        
+        logger.info(f"Extracted risk_factors = {risk_factors}")
         
         if "HIGH_RISK_JURISDICTION" in risk_factors:
             audit_report["detailed_findings"]["compliance_concerns"].append(
@@ -174,7 +196,6 @@ def generate_audit_report_from_risk_analysis(
             audit_report["detailed_findings"]["regulatory_implications"].append(
                 "Pattern analysis indicates potential compliance concerns"
             )
-            audit_report["compliance_status"]["requires_immediate_action"] = True
         
         if "SANCTIONS_CONCERN" in risk_factors:
             audit_report["detailed_findings"]["compliance_concerns"].append(
@@ -183,7 +204,17 @@ def generate_audit_report_from_risk_analysis(
             audit_report["detailed_findings"]["regulatory_implications"].append(
                 "Immediate review required based on sanctions risk indicators"
             )
-            audit_report["compliance_status"]["requires_immediate_action"] = True
+        
+        # Only override the risk score decision if we couldn't parse it
+        if risk_score is None or not isinstance(risk_score, (int, float)):
+            if "SANCTIONS_CONCERN" in risk_factors or "SUSPICIOUS_PATTERN" in risk_factors:
+                audit_report["compliance_status"]["requires_immediate_action"] = True
+                audit_report["compliance_status"]["compliance_rating"] = "NON_COMPLIANT"
+                audit_report["executive_summary"]["audit_conclusion"] = "HIGH RISK - Immediate review required (based on risk factors)"
+            elif "HIGH_RISK_JURISDICTION" in risk_factors or "UNUSUAL_AMOUNT" in risk_factors:
+                audit_report["compliance_status"]["requires_enhanced_monitoring"] = True
+                audit_report["compliance_status"]["compliance_rating"] = "CONDITIONAL_COMPLIANCE"
+                audit_report["executive_summary"]["audit_conclusion"] = "MEDIUM RISK - Enhanced monitoring recommended (based on risk factors)"
         
         # Generate recommendations
         if audit_report["compliance_status"]["requires_immediate_action"]:
@@ -361,13 +392,15 @@ You must ensure all audit reports are comprehensive, accurate, and suitable for 
     chat_client=AzureAIAgentClient(
         project_endpoint=project_endpoint,
         model_deployment_name=model_deployment_name,
-        async_credential=AzureCliCredential()
+        async_credential=AzureCliCredential(),
+        agent_id=os.environ.get("COMPLIANCE_REPORT_AGENT_ID")
     ),
     tools=[
         parse_risk_analysis_result,
         generate_audit_report_from_risk_analysis,
         generate_executive_audit_summary
     ],
+    store=True
 )
 
 

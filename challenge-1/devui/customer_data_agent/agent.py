@@ -87,6 +87,7 @@ agent = ChatAgent(
         get_customer_transactions,
         get_transaction_data,
     ],
+    store=True
 )
 
 

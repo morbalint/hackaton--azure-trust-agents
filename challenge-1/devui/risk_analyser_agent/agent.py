@@ -65,10 +65,12 @@ async def _create_agent():
 
     Use the Azure AI Search to look up relevant regulations, compliance rules, and fraud detection patterns that apply to the transaction.
 
-    Output should be:
-    - risk_score: integer (0-100)
-    - risk_level: [Low, Medium, High]
-    - reason: a brief explainable summary with references to relevant regulations or policies found via search""",
+    IMPORTANT: Your output MUST start with these exact lines (use actual numbers):
+    Risk Score: <number 0-100>
+    Risk Level: <Low/Medium/High>
+    Transaction: <transaction_id>
+    
+    Then provide your detailed analysis and reasoning with references to relevant regulations or policies found via search.""",
                 tools=[{"type": "azure_ai_search"}],
                 tool_resources={
                     "azure_ai_search": {

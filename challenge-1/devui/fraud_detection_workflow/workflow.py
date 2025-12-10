@@ -217,13 +217,19 @@ def parse_risk_analysis_result(risk_analysis_text: str) -> dict:
             "audit_findings": []
         }
         
+        # Log the raw text for debugging
+        print(f"DEBUG: Parsing risk analysis text (first 500 chars):\n{risk_analysis_text[:500]}\n")
+        
         text_lower = risk_analysis_text.lower()
         
-        # Extract risk score
+        # Extract risk score - try multiple patterns
         risk_score_pattern = r'risk\s*score[:\s]*(\d+(?:\.\d+)?)'
         score_match = re.search(risk_score_pattern, text_lower)
         if score_match:
             analysis_data["parsed_elements"]["risk_score"] = float(score_match.group(1))
+            print(f"DEBUG: Successfully extracted risk_score = {analysis_data['parsed_elements']['risk_score']}")
+        else:
+            print(f"WARNING: Could not extract risk_score from text using pattern: {risk_score_pattern}")
         
         # Extract risk level
         risk_level_pattern = r'risk\s*level[:\s]*(\w+)'
@@ -237,18 +243,37 @@ def parse_risk_analysis_result(risk_analysis_text: str) -> dict:
         if tx_match:
             analysis_data["parsed_elements"]["transaction_id"] = tx_match.group(1)
         
-        # Extract key risk factors mentioned
+        # Extract key risk factors mentioned (with negation awareness)
         risk_factors = []
-        if "high-risk country" in text_lower or "high risk country" in text_lower:
-            risk_factors.append("HIGH_RISK_JURISDICTION")
-        if "large amount" in text_lower or "high amount" in text_lower:
-            risk_factors.append("UNUSUAL_AMOUNT")
+        
+        # Only add risk factors if mentioned positively (not negated)
+        # Check for high-risk country
+        if ("high-risk country" in text_lower or "high risk country" in text_lower):
+            # Avoid false positives from negation
+            if not any(neg in text_lower for neg in ["not a high-risk", "not high-risk", "no high-risk", "not involve a high-risk", "does not involve"]):
+                risk_factors.append("HIGH_RISK_JURISDICTION")
+        
+        # Check for unusual amounts
+        if ("large amount" in text_lower or "high amount" in text_lower or "unusual amount" in text_lower):
+            if not any(neg in text_lower for neg in ["not a large", "not high", "not unusual", "no large", "no unusual"]):
+                risk_factors.append("UNUSUAL_AMOUNT")
+        
+        # Check for suspicious patterns
         if "suspicious" in text_lower:
-            risk_factors.append("SUSPICIOUS_PATTERN")
+            if not any(neg in text_lower for neg in ["not suspicious", "no suspicious", "nothing suspicious"]):
+                risk_factors.append("SUSPICIOUS_PATTERN")
+        
+        # Check for sanctions
         if "sanction" in text_lower:
-            risk_factors.append("SANCTIONS_CONCERN")
+            if not any(neg in text_lower for neg in ["not sanctioned", "no sanction", "not under sanction"]):
+                risk_factors.append("SANCTIONS_CONCERN")
+        
+        # Check for frequency anomalies
         if "frequent" in text_lower or "unusual frequency" in text_lower:
-            risk_factors.append("FREQUENCY_ANOMALY")
+            if not any(neg in text_lower for neg in ["not frequent", "no unusual frequency"]):
+                risk_factors.append("FREQUENCY_ANOMALY")
+        
+        print(f"DEBUG: Extracted risk_factors = {risk_factors}")
         
         analysis_data["parsed_elements"]["risk_factors"] = risk_factors
         return analysis_data
@@ -296,8 +321,13 @@ def generate_audit_report_from_risk_analysis(risk_analysis_text: str, report_typ
         }
         
         # Analyze risk score for audit conclusions
-        risk_score = elements.get("risk_score", 0)
-        if isinstance(risk_score, (int, float)):
+        risk_score = elements.get("risk_score", None)
+        
+        # Log for debugging
+        print(f"DEBUG: Extracted risk_score = {risk_score}, type = {type(risk_score)}")
+        
+        # Primary decision based on risk score (if available)
+        if risk_score is not None and isinstance(risk_score, (int, float)):
             if risk_score >= 80:
                 audit_report["executive_summary"]["audit_conclusion"] = "HIGH RISK - Immediate review required"
                 audit_report["compliance_status"]["requires_immediate_action"] = True
@@ -309,21 +339,43 @@ def generate_audit_report_from_risk_analysis(risk_analysis_text: str, report_typ
             else:
                 audit_report["executive_summary"]["audit_conclusion"] = "LOW RISK - Standard monitoring sufficient"
                 audit_report["compliance_status"]["compliance_rating"] = "COMPLIANT"
+        else:
+            # If we can't parse risk score, mark as PENDING and use risk factors as fallback
+            audit_report["executive_summary"]["audit_conclusion"] = "RISK ASSESSMENT PENDING - Unable to parse risk score"
+            audit_report["compliance_status"]["compliance_rating"] = "PENDING"
+            print(f"WARNING: Could not parse risk score from analysis. Setting to PENDING.")
+            
+            # Only use risk factors for decision if we don't have a risk score
+            if "SANCTIONS_CONCERN" in risk_factors or "SUSPICIOUS_PATTERN" in risk_factors:
+                audit_report["compliance_status"]["requires_immediate_action"] = True
+                audit_report["compliance_status"]["compliance_rating"] = "NON_COMPLIANT"
+                audit_report["executive_summary"]["audit_conclusion"] = "HIGH RISK - Immediate review required (based on risk factors)"
+            elif "HIGH_RISK_JURISDICTION" in risk_factors or "UNUSUAL_AMOUNT" in risk_factors:
+                audit_report["compliance_status"]["requires_enhanced_monitoring"] = True
+                audit_report["compliance_status"]["compliance_rating"] = "CONDITIONAL_COMPLIANCE"
+                audit_report["executive_summary"]["audit_conclusion"] = "MEDIUM RISK - Enhanced monitoring recommended (based on risk factors)"
         
-        # Add specific findings based on risk factors
-        risk_factors = elements.get("risk_factors", [])
-        
+        # Add detailed findings based on specific risk factors (informational only, doesn't override risk score)
         if "HIGH_RISK_JURISDICTION" in risk_factors:
             audit_report["detailed_findings"]["compliance_concerns"].append(
                 "Transaction involves high-risk jurisdiction requiring enhanced monitoring"
             )
             audit_report["compliance_status"]["requires_regulatory_filing"] = True
         
+        if "UNUSUAL_AMOUNT" in risk_factors:
+            audit_report["detailed_findings"]["compliance_concerns"].append(
+                "Transaction amount exceeds normal patterns for customer profile"
+            )
+        
+        if "SUSPICIOUS_PATTERN" in risk_factors:
+            audit_report["detailed_findings"]["compliance_concerns"].append(
+                "Suspicious transaction pattern detected requiring investigation"
+            )
+        
         if "SANCTIONS_CONCERN" in risk_factors:
             audit_report["detailed_findings"]["compliance_concerns"].append(
                 "Potential sanctions-related issues identified in risk analysis"
             )
-            audit_report["compliance_status"]["requires_immediate_action"] = True
         
         # Generate recommendations
         if audit_report["compliance_status"]["requires_immediate_action"]:
@@ -383,10 +435,12 @@ async def risk_analyzer_executor(
                     - Suspicious account age: < 30 days
                     - Low device trust threshold: < 0.5
                     
-                    Output should include:
-                    - risk_score: integer (0-100)
-                    - risk_level: [Low, Medium, High]
-                    - reason: brief explainable summary with regulatory considerations""",
+                    IMPORTANT: Your output MUST start with these exact lines (use actual numbers):
+                    Risk Score: <number 0-100>
+                    Risk Level: <Low/Medium/High>
+                    Transaction: <transaction_id>
+                    
+                    Then provide your detailed analysis and reasoning.""",
                 )
                 
                 # Create risk assessment prompt
